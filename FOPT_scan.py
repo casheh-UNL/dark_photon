@@ -5,8 +5,30 @@ import sys
 import os
 import time
 import json
+import signal
+from contextlib import contextmanager
 
 from kinetic_mixing import KineticMixing
+
+
+class TimeoutException(Exception):
+    pass
+
+@contextmanager
+def time_limit(seconds):
+    """Context manager that raises TimeoutException after specified seconds."""
+    def signal_handler(signum, frame):
+        raise TimeoutException(f"Computation exceeded {seconds} second time limit")
+    
+    # Set the signal handler and alarm
+    signal.signal(signal.SIGALRM, signal_handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        # Disable the alarm
+        signal.alarm(0)
+
 
 # Find the absolute path to the ELENA/src directory
 src_path = os.path.abspath('ELENA/src')
@@ -30,13 +52,13 @@ def lambda_max(g, y):
     c = 5 + np.log(4)
     g4, y4 = g**4, y**4
 
-    if not ((4*np.pi**2 / c) > 3*g4 - 4*y4):
+    if not ((32*np.pi**4 / c) > 48*g4 - y4):
         raise ValueError("The given g and y values yield a complex-valued λ_max.")
     
     # using the negative root
-    if not (3*g4 - 4*y4 > 0):
+    if not (48*g4 - y4 > 0):
         raise ValueError("Quartic coupling λ_max is negative.")
-    return (2*np.pi - np.sqrt(-3*g4*c + 4*(np.pi**2 + y4*c))) / (4*np.pi * c)
+    return (8*np.pi**2 - np.sqrt(64*np.pi**4 - 2*c*(48*g4 - y4))) / (2. * c)
 
 
 def sample_parameters(g_min=1e-2, g_max=None, y_min=1e-2, y_max=None, eps=0.1):
@@ -52,12 +74,13 @@ def sample_parameters(g_min=1e-2, g_max=None, y_min=1e-2, y_max=None, eps=0.1):
         y_scan = 10**(np.random.uniform(np.log10(y_min), np.log10(y_max)))
 
         g4, y4 = g_scan**4, y_scan**4
-        c = 4*np.pi**2 / (5 + np.log(4))
-        if 0 < 3*g4 - 4*y4 < c:
+        b = 32*np.pi**4 / (5 + np.log(4))
+        if 0 < 48*g4 - y4 < b:
             # lambda_max will be real and positive
             lambda_scan = lambda_max(g_scan, y_scan) * (1 - np.random.uniform(0, eps))
-            # lambda_scan = 10**(np.random.uniform(np.log10(1e-5), np.log10(4*np.pi)))
-            found = True
+            # lambda_scan = 10**(np.random.uniform(np.log10(1e-4), np.log10(4*np.pi)))
+            if lambda_scan < 2:  # ELENA cannot handle values that are too high
+                found = True
     
     return g_scan, y_scan, lambda_scan
 
@@ -407,7 +430,7 @@ def convert_to_serializable(obj):
 
 def compute_multiple_points(n_points=100, output_file='FOPT_parameters_.json', 
                            g_min=1e-2, g_max=None, y_min=1e-2, y_max=None, eps=0.1,
-                           vev=1.0, units='GeV', v_w=1.0, verbose=True):
+                           vev=1.0, units='GeV', v_w=1.0, timeout=60, verbose=True):
     """
     Compute multiple FOPT points and save to JSON file.
     
@@ -441,9 +464,15 @@ def compute_multiple_points(n_points=100, output_file='FOPT_parameters_.json',
         # Sample parameters
         g, y, lam = sample_parameters(g_min, g_max, y_min, y_max, eps)
         
-        # Compute point
-        point = compute_fopt_point(g, y, lam, vev=vev, units=units, v_w=v_w, 
-                                   n_points=100, verbose=verbose)
+        # Compute point with timeout
+        try:
+            with time_limit(timeout):
+                point = compute_fopt_point(g, y, lam, vev=vev, units=units, v_w=v_w, 
+                                        n_points=100, verbose=verbose)
+        except TimeoutException as e:
+            if verbose:
+                print(f"Attempt {total_attempts} timed out after 60 seconds (successful: {successful_points}/{n_points})")
+            point = None
         
         if point is not None:
             results.append(point)
@@ -456,17 +485,12 @@ def compute_multiple_points(n_points=100, output_file='FOPT_parameters_.json',
             
             if verbose:
                 print(f"Point {successful_points}/{n_points} completed in {point_time:.2f}s "
-                      f"(Attempts: {total_attempts}, Success rate: {successful_points/total_attempts*100:.1f}%, "
-                      f"ETA: {eta/60:.1f}m)")
+                    f"(Attempts: {total_attempts}, Success rate: {successful_points/total_attempts*100:.1f}%, "
+                    f"ETA: {eta/60:.1f}m)")
             
             # Save result immediately after each successful point
             with open(output_file, 'a') as f:
                 f.write(json.dumps(point) + '\n')
-            
-            # Progress message every 10 successful points
-            if successful_points % 10 == 0:
-                if verbose:
-                    print(f"Progress checkpoint: {successful_points} points saved")
         else:
             if verbose:
                 print(f"Attempt {total_attempts} failed (successful: {successful_points}/{n_points})")
@@ -505,6 +529,8 @@ def main():
                        help='Maximum y value (default: sqrt(4*pi))')
     parser.add_argument('-q', '--quiet', action='store_true',
                        help='Suppress progress output')
+    parser.add_argument('--timeout', type=int, default=60,
+                   help='Timeout in seconds for each point computation (default: 60)')
     parser.add_argument('--test', nargs='+', type=float,
                        help='Test a specific (g, y) or (g, y, lam) point instead of scanning')
     
@@ -547,6 +573,7 @@ def main():
             y_min=args.y_min,
             y_max=args.y_max,
             vev=args.vev,
+            timeout=args.timeout,
             verbose=not args.quiet
         )
 
