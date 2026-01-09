@@ -72,13 +72,14 @@ def sample_parameters(g_min=1e-2, g_max=None, y_min=1e-2, y_max=None, eps=0.1):
     while not found:
         g_scan = 10**(np.random.uniform(np.log10(g_min), np.log10(g_max)))
         y_scan = 10**(np.random.uniform(np.log10(y_min), np.log10(y_max)))
+        # lambda_scan = 10**(np.random.uniform(np.log10(1e-4), np.log10(4*np.pi)))
+        # found = True
 
         g4, y4 = g_scan**4, y_scan**4
         b = 32*np.pi**4 / (5 + np.log(4))
         if 0 < 48*g4 - y4 < b:
             # lambda_max will be real and positive
             lambda_scan = lambda_max(g_scan, y_scan) * (1 - np.random.uniform(0, eps))
-            # lambda_scan = 10**(np.random.uniform(np.log10(1e-4), np.log10(4*np.pi)))
             if lambda_scan < 2:  # ELENA cannot handle values that are too high
                 found = True
     
